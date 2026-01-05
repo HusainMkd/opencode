@@ -474,6 +474,21 @@ export const GithubRunCommand = cmd({
       let session: { id: string; title: string; version: string }
       let shareId: string | undefined
       let exitCode = 0
+      const sessionStats = {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheTokens: 0,
+        reasoningTokens: 0,
+        cost: 0,
+        requests: 0,
+      }
+
+      function formatTokens(tokens: number): string {
+        if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`
+        if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}K`
+        return tokens.toString()
+      }
+
       type PromptFiles = Awaited<ReturnType<typeof getUserPrompt>>["promptFiles"]
       const triggerCommentId = isCommentEvent
         ? (payload as IssueCommentEvent | PullRequestReviewCommentEvent).comment.id
@@ -921,6 +936,15 @@ export const GithubRunCommand = cmd({
           )
         }
 
+        if (result.info.role === "assistant" && result.info.tokens) {
+          sessionStats.inputTokens += result.info.tokens.input || 0
+          sessionStats.outputTokens += result.info.tokens.output || 0
+          sessionStats.cacheTokens += (result.info.tokens.cache?.read || 0) + (result.info.tokens.cache?.write || 0)
+          sessionStats.reasoningTokens += result.info.tokens.reasoning || 0
+          sessionStats.cost += result.info.cost || 0
+          sessionStats.requests++
+        }
+
         const text = extractResponseText(result.parts)
         if (text) return text
 
@@ -942,6 +966,15 @@ export const GithubRunCommand = cmd({
             },
           ],
         })
+
+        if (summary.info.role === "assistant" && summary.info.tokens) {
+          sessionStats.inputTokens += summary.info.tokens.input || 0
+          sessionStats.outputTokens += summary.info.tokens.output || 0
+          sessionStats.cacheTokens += (summary.info.tokens.cache?.read || 0) + (summary.info.tokens.cache?.write || 0)
+          sessionStats.reasoningTokens += summary.info.tokens.reasoning || 0
+          sessionStats.cost += summary.info.cost || 0
+          sessionStats.requests++
+        }
 
         if (summary.info.role === "assistant" && summary.info.error) {
           console.error(summary.info)
@@ -1305,7 +1338,11 @@ Co-authored-by: ${actor} <${actor}@users.noreply.github.com>"`
           return `<a href="${shareBaseUrl}/s/${shareId}"><img width="200" alt="${titleAlt}" src="https://social-cards.sst.dev/opencode-share/${title64}.png?model=${providerID}/${modelID}&version=${session.version}&id=${shareId}" /></a>\n`
         })()
         const shareUrl = shareId ? `[opencode session](${shareBaseUrl}/s/${shareId})&nbsp;&nbsp;|&nbsp;&nbsp;` : ""
-        return `\n\n${image}${shareUrl}[github run](${runUrl})`
+        const statsStr =
+          sessionStats.requests > 0
+            ? `<sub>📊 ${formatTokens(sessionStats.inputTokens)} in / ${formatTokens(sessionStats.outputTokens)} out | $${sessionStats.cost.toFixed(3)} | ${sessionStats.requests} req</sub>`
+            : ""
+        return `\n\n${image}${shareUrl}${statsStr ? `${statsStr}\n\n` : ""}[github run](${runUrl})`
       }
 
       async function fetchRepo() {
