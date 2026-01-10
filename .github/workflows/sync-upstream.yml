@@ -44,9 +44,9 @@ jobs:
       - name: Apply our sidebar changes
         run: |
           # Create a patch file with our changes
-          git checkout main
+          git checkout dev
           git format-patch --stdout HEAD~1 > sidebar-stats.patch
-          
+
           # Go back to sync branch and apply
           git checkout sync/upstream-*
           git am sidebar-stats.patch || {
@@ -72,16 +72,16 @@ jobs:
           - Latest upstream: $(git rev-parse --short upstream/dev)
 
           This PR maintains the sidebar stats implementation while bringing in latest upstream changes." \
-            --base main \
+            --base dev \
             --head sync/upstream-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-      - name: Merge to main if successful
+
+      - name: Merge to dev if successful
         if: success()
         run: |
-          git checkout main
+          git checkout dev
           git merge sync/upstream-*
-          git push origin main
+          git push origin dev
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
