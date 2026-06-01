@@ -2,9 +2,9 @@ import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { createMemo, createSignal } from "solid-js"
 import { Locale } from "@/util/locale"
-import { Keybind } from "@/util/keybind"
 import { useTheme } from "../context/theme"
 import { usePromptStash, type StashEntry } from "./prompt/stash"
+import { useCommandShortcut } from "../keymap"
 
 function getRelativeTime(timestamp: number): string {
   const now = Date.now()
@@ -32,6 +32,7 @@ export function DialogStash(props: { onSelect: (entry: StashEntry) => void }) {
   const { theme } = useTheme()
 
   const [toDelete, setToDelete] = createSignal<number>()
+  const deleteHint = useCommandShortcut("stash.delete")
 
   const options = createMemo(() => {
     const entries = stash.list()
@@ -41,7 +42,7 @@ export function DialogStash(props: { onSelect: (entry: StashEntry) => void }) {
         const isDeleting = toDelete() === index
         const lineCount = (entry.input.match(/\n/g)?.length ?? 0) + 1
         return {
-          title: isDeleting ? "Press ctrl+d again to confirm" : getStashPreview(entry.input),
+          title: isDeleting ? `Press ${deleteHint()} again to confirm` : getStashPreview(entry.input),
           bg: isDeleting ? theme.error : undefined,
           value: index,
           description: getRelativeTime(entry.timestamp),
@@ -67,9 +68,9 @@ export function DialogStash(props: { onSelect: (entry: StashEntry) => void }) {
         }
         dialog.clear()
       }}
-      keybind={[
+      actions={[
         {
-          keybind: Keybind.parse("ctrl+d")[0],
+          command: "stash.delete",
           title: "delete",
           onTrigger: (option) => {
             if (toDelete() === option.value) {

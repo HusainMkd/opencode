@@ -1,4 +1,5 @@
 name: opencode
+
 on:
   issue_comment:
     types: [created]
@@ -8,26 +9,26 @@ on:
 jobs:
   opencode:
     if: |
-      contains(github.event.comment.body, '/oc') ||
-      contains(github.event.comment.body, '/opencode')
-    runs-on: ubuntu-latest
+      contains(github.event.comment.body, ' /oc') ||
+      startsWith(github.event.comment.body, '/oc') ||
+      contains(github.event.comment.body, ' /opencode') ||
+      startsWith(github.event.comment.body, '/opencode')
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       id-token: write
-      contents: write
-      pull-requests: write
-      issues: write
+      contents: read
+      pull-requests: read
+      issues: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Setup Antigravity Auth
-        run: |
-          mkdir -p ~/.config/opencode
-          echo '${{ secrets.ANTIGRAVITY_ACCOUNTS }}' > ~/.config/opencode/antigravity-accounts.json
+      - uses: ./.github/actions/setup-bun
 
-      - name: Run OpenCode
-        uses: anomalyco/opencode/github@latest
+      - name: Run opencode
+        uses: anomalyco/opencode/github@2c14fc5586fe0b88e5c04732d2e846769cc35671 # latest
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_PERMISSION: '{"bash": "deny"}'
         with:
-          model: google/antigravity-claude-opus-4-5-thinking-medium
+          model: opencode/claude-opus-4-5

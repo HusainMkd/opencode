@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Force merge even with conflicts'
+        description: 'Retry merge using the upstream-preferred conflict strategy'
         required: false
         type: boolean
         default: false
@@ -18,70 +18,75 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    
+    env:
+      UPSTREAM_REPO: ${{ vars.OPENCODE_UPSTREAM_REPO }}
+      UPSTREAM_BRANCH: ${{ vars.OPENCODE_UPSTREAM_BRANCH }}
+      TARGET_BRANCH: ${{ vars.OPENCODE_TARGET_BRANCH }}
+
     steps:
       - name: Checkout fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-    
+
+      - uses: ./.github/actions/setup-bun
+
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-    
-      - name: Add upstream remote
-        run: |
-          git remote add upstream https://github.com/anomalyco/opencode.git
-          git fetch upstream
-    
-      - name: Create sync branch
-        run: |
-          git checkout -b sync/upstream-$(date +%Y%m%d-%H%M%S)
-          git reset --hard upstream/dev
-    
-      - name: Apply our sidebar changes
-        run: |
-          # Create a patch file with our changes
-          git checkout dev
-          git format-patch --stdout HEAD~1 > sidebar-stats.patch
 
-          # Go back to sync branch and apply
-          git checkout sync/upstream-*
-          git am sidebar-stats.patch || {
-            echo "Patch application failed, creating manual PR"
-            exit 1
-          }
-    
-      - name: Build and test
+      - name: Install dependencies
         run: |
-          cd packages/opencode
-          bun install
-          bun run build
-    
+          bun install --frozen-lockfile
+
+      - name: Merge upstream into sync branch
+        id: sync
+        run: |
+          sync_branch="sync/upstream-${{ github.run_id }}-${{ github.run_attempt }}"
+          args=(--print-branch --sync-branch "$sync_branch")
+          if [ "${{ github.event.inputs.force || 'false' }}" = "true" ]; then
+            args+=(--force)
+          fi
+          ./scripts/sync-upstream.sh "${args[@]}" | tee /tmp/sync-branch.txt
+          echo "branch=$(tail -n 1 /tmp/sync-branch.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Check for new commits
+        id: changes
+        run: |
+          target_branch="${TARGET_BRANCH:-dev}"
+          git fetch origin "$target_branch"
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$target_branch")" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run validation
+        if: steps.changes.outputs.has_changes == 'true'
+        run: bun typecheck
+
+      - name: Push sync branch
+        if: steps.changes.outputs.has_changes == 'true'
+        run: git push origin "${{ steps.sync.outputs.branch }}"
+
       - name: Create Pull Request
+        if: steps.changes.outputs.has_changes == 'true'
         run: |
-          git push origin sync/upstream-*
+          target_branch="${TARGET_BRANCH:-dev}"
+          upstream_repo="${UPSTREAM_REPO:-anomalyco/opencode}"
+          upstream_branch="${UPSTREAM_BRANCH:-dev}"
           gh pr create \
-            --title "feat: sync upstream changes with sidebar stats" \
-            --body "Automated sync from upstream with sidebar stats feature preserved.
+            --title "chore: sync ${upstream_repo}@${upstream_branch} into ${target_branch}" \
+            --body "Automated sync from \`${upstream_repo}@${upstream_branch}\` into \`${target_branch}\`.
 
-          Changes from upstream:
-          - $(git log --oneline upstream/dev ^HEAD~1 | wc -l) commits merged
-          - Latest upstream: $(git rev-parse --short upstream/dev)
+- Source SHA: \`$(git rev-parse --short "upstream/${upstream_branch}")\`
+- Target SHA before merge: \`$(git rev-parse --short "origin/${target_branch}")\`
+- Sync branch: \`${{ steps.sync.outputs.branch }}\`
 
-          This PR maintains the sidebar stats implementation while bringing in latest upstream changes." \
-            --base dev \
-            --head sync/upstream-*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Merge to dev if successful
-        if: success()
-        run: |
-          git checkout dev
-          git merge sync/upstream-*
-          git push origin dev
+This PR was created by \`.github/workflows/sync-upstream.yml\`." \
+            --base "$target_branch" \
+            --head "${{ steps.sync.outputs.branch }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

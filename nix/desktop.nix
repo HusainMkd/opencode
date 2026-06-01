@@ -1,145 +1,110 @@
 {
   lib,
   stdenv,
-  rustPlatform,
   bun,
-  pkg-config,
-  dbus ? null,
-  openssl,
-  glib ? null,
-  gtk3 ? null,
-  libsoup_3 ? null,
-  webkitgtk_4_1 ? null,
-  librsvg ? null,
-  libappindicator-gtk3 ? null,
-  cargo,
-  rustc,
-  makeBinaryWrapper,
   nodejs,
-  jq,
+  darwin,
+  electron_41,
+  makeWrapper,
+  writableTmpDirAsHomeHook,
+  autoPatchelfHook,
+  opencode,
 }:
-args:
 let
-  scripts = args.scripts;
-  mkModules =
-    attrs:
-    args.mkNodeModules (
-      attrs
-      // {
-        canonicalizeScript = scripts + "/canonicalize-node-modules.ts";
-        normalizeBinsScript = scripts + "/normalize-bun-binaries.ts";
-      }
-    );
+  electron = electron_41;
 in
-rustPlatform.buildRustPackage rec {
+stdenv.mkDerivation (finalAttrs: {
   pname = "opencode-desktop";
-  version = args.version;
-
-  src = args.src;
-
-  # We need to set the root for cargo, but we also need access to the whole repo.
-  postUnpack = ''
-    # Update sourceRoot to point to the tauri app
-    sourceRoot+=/packages/desktop/src-tauri
-  '';
-
-  cargoLock = {
-    lockFile = ../packages/desktop/src-tauri/Cargo.lock;
-    allowBuiltinFetchGit = true;
-  };
-
-  node_modules = mkModules {
-    version = version;
-    src = src;
-  };
+  inherit (opencode)
+    version
+    src
+    node_modules
+    patches
+    ;
 
   nativeBuildInputs = [
-    pkg-config
     bun
-    makeBinaryWrapper
-    cargo
-    rustc
     nodejs
-    jq
+    makeWrapper
+    writableTmpDirAsHomeHook
+  ] ++ lib.optionals stdenv.hostPlatform.isLinux [
+    autoPatchelfHook
+  ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
+    # Ad-hoc sign the .app: --config.mac.identity=null below skips signing.
+    darwin.autoSignDarwinBinariesHook
   ];
 
-  buildInputs = [
-    openssl
-  ]
-  ++ lib.optionals stdenv.isLinux [
-    dbus
-    glib
-    gtk3
-    libsoup_3
-    webkitgtk_4_1
-    librsvg
-    libappindicator-gtk3
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
+    (lib.getLib stdenv.cc.cc)
   ];
+
+  env = opencode.env // {
+    ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
+  };
+
+  # https://github.com/electron/electron/issues/31121
+  # mac builds use a .app bundle which doesnt have this issue
+  postPatch = lib.optionalString stdenv.isLinux ''
+    BASE_PATH=packages/desktop
+    FILES=(src/main/windows.ts)
+    for file in "''${FILES[@]}"; do
+      substituteInPlace $BASE_PATH/$file \
+        --replace-fail "process.resourcesPath" "'$out/opt/opencode-desktop/resources'"
+    done
+  '';
 
   preBuild = ''
-    # Restore node_modules
-    pushd ../../..
+    cp -r "${electron.dist}" $HOME/.electron-dist
+    chmod -R u+w $HOME/.electron-dist
 
-    # Copy node_modules from the fixed-output derivation
-    # We use cp -r --no-preserve=mode to ensure we can write to them if needed,
-    # though we usually just read.
-    cp -r ${node_modules}/node_modules .
-    cp -r ${node_modules}/packages .
-
-    # Ensure node_modules is writable so patchShebangs can update script headers
-    chmod -R u+w node_modules
-    # Ensure workspace packages are writable for tsgo incremental outputs (.tsbuildinfo)
-    chmod -R u+w packages
-    # Patch shebangs so scripts can run
+    cp -R ${finalAttrs.node_modules}/. .
     patchShebangs node_modules
+    patchShebangs packages/*/node_modules
+  '';
 
-    # Copy sidecar
-    mkdir -p packages/desktop/src-tauri/sidecars
-    targetTriple=${stdenv.hostPlatform.rust.rustcTarget}
-    cp ${args.opencode}/bin/opencode packages/desktop/src-tauri/sidecars/opencode-cli-$targetTriple
+  buildPhase = ''
+    runHook preBuild
 
-    # Merge prod config into tauri.conf.json
-    if ! jq -s '.[0] * .[1]' \
-      packages/desktop/src-tauri/tauri.conf.json \
-      packages/desktop/src-tauri/tauri.prod.conf.json \
-      > packages/desktop/src-tauri/tauri.conf.json.tmp; then
-      echo "Error: failed to merge tauri.conf.json with tauri.prod.conf.json" >&2
-      exit 1
-    fi
-    mv packages/desktop/src-tauri/tauri.conf.json.tmp packages/desktop/src-tauri/tauri.conf.json
-
-    # Build the frontend
     cd packages/desktop
 
-    # The 'build' script runs 'bun run typecheck && vite build'.
     bun run build
+    npx electron-builder --dir \
+      --config electron-builder.config.ts \
+      --config.mac.identity=null \
+      --config.electronDist="$HOME/.electron-dist"
 
-    popd
+    runHook postBuild
   '';
 
-  # Tauri bundles the assets during the rust build phase (which happens after preBuild).
-  # It looks for them in the location specified in tauri.conf.json.
+  installPhase =
+    ''
+      runHook preInstall
+    ''
+    + lib.optionalString stdenv.hostPlatform.isDarwin ''
+      mkdir -p $out/Applications
+      mv dist/mac*/*.app $out/Applications
+      makeWrapper "$out/Applications/OpenCode.app/Contents/MacOS/OpenCode" $out/bin/opencode-desktop
+    ''
+    + lib.optionalString stdenv.hostPlatform.isLinux ''
+      mkdir -p $out/opt/opencode-desktop
+      cp -r dist/linux*-unpacked/{resources,LICENSE*} $out/opt/opencode-desktop
+      makeWrapper ${lib.getExe electron} $out/bin/opencode-desktop \
+        --inherit-argv0 \
+        --set ELECTRON_FORCE_IS_PACKAGED 1 \
+        --add-flags $out/opt/opencode-desktop/resources/app.asar \
+        --add-flags "\''${NIXOS_OZONE_WL:+\''${WAYLAND_DISPLAY:+--ozone-platform-hint=auto --enable-features=WaylandWindowDecorations --enable-wayland-ime=true}}"
+    ''
+    + ''
+      runHook postInstall
+    '';
 
-  postInstall = lib.optionalString stdenv.isLinux ''
-    # Wrap the binary to ensure it finds the libraries
-    wrapProgram $out/bin/opencode-desktop \
-      --prefix LD_LIBRARY_PATH : ${
-        lib.makeLibraryPath [
-          gtk3
-          webkitgtk_4_1
-          librsvg
-          glib
-          libsoup_3
-        ]
-      }
-  '';
+  autoPatchelfIgnoreMissingDeps = [
+    "libc.musl-x86_64.so.1"
+  ];
 
-  meta = with lib; {
+  meta = {
     description = "OpenCode Desktop App";
-    homepage = "https://opencode.ai";
-    license = licenses.mit;
-    maintainers = with maintainers; [ ];
     mainProgram = "opencode-desktop";
-    platforms = platforms.linux ++ platforms.darwin;
+    inherit (opencode.meta) homepage license platforms;
   };
-}
+})
