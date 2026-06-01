@@ -1,81 +1,50 @@
-# Sync upstream changes while preserving our sidebar stats
-# Usage: .\scripts\sync-upstream.ps1 [-Force]
+# Sync upstream changes into the local target branch.
+# Usage: .\scripts\sync-upstream.ps1 [-Force] [-PrintBranch] [-TargetBranch dev]
 
 param(
-    [switch]$Force
+    [switch]$Force,
+    [switch]$PrintBranch,
+    [string]$TargetBranch = $(if ($env:TARGET_BRANCH) { $env:TARGET_BRANCH } else { "dev" }),
+    [string]$UpstreamBranch = $(if ($env:UPSTREAM_BRANCH) { $env:UPSTREAM_BRANCH } else { "dev" }),
+    [string]$UpstreamRepo = $(if ($env:UPSTREAM_REPO) { $env:UPSTREAM_REPO } else { "anomalyco/opencode" }),
+    [string]$UpstreamRemote = $(if ($env:UPSTREAM_REMOTE) { $env:UPSTREAM_REMOTE } else { "upstream" }),
+    [string]$SyncBranch = $(if ($env:SYNC_BRANCH) { $env:SYNC_BRANCH } else { "sync/upstream-$(Get-Date -Format 'yyyyMMdd-HHmmss')" })
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "🔄 Syncing upstream changes..." -ForegroundColor Cyan
+git diff --quiet
+git diff --cached --quiet
 
-# Get current branch
-$CurrentBranch = git branch --show-current
-Write-Host "Current branch: $CurrentBranch" -ForegroundColor Gray
+Write-Host "🔄 Syncing $UpstreamRepo@$UpstreamBranch into $TargetBranch" -ForegroundColor Cyan
 
-# Create sync branch
-$SyncBranch = "sync/upstream-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-git checkout -b $SyncBranch
-Write-Host "Created sync branch: $SyncBranch" -ForegroundColor Gray
-
-# Fetch upstream
-git fetch upstream
-Write-Host "Fetched upstream changes" -ForegroundColor Gray
-
-# Reset to upstream/dev
-git reset --hard upstream/dev
-Write-Host "Reset to upstream/dev" -ForegroundColor Gray
-
-# Get the commit hash before our changes
-$MainHash = git rev-parse main
-
-# Try to cherry-pick our sidebar changes
-Write-Host "Applying sidebar stats changes..." -ForegroundColor Yellow
-try {
-    git cherry-pick $MainHash
-    Write-Host "✅ Successfully applied sidebar changes" -ForegroundColor Green
-} catch {
-    Write-Host "❌ Failed to apply sidebar changes automatically" -ForegroundColor Red
-    
-    if ($Force) {
-        Write-Host "🔧 Force mode: attempting manual merge..." -ForegroundColor Yellow
-        git cherry-pick --abort 2>$null
-        
-        # Create a commit with our sidebar changes manually
-        New-Item -ItemType Directory -Force -Path ".opencode/plugin"
-        @"
-// Sidebar stats plugin - preserved during sync
-export const SidebarStatsPlugin = async (ctx) => {
-  return {
-    // Plugin implementation would go here
-  }
+if (git remote get-url $UpstreamRemote 2>$null) {
+    git remote set-url $UpstreamRemote "https://github.com/$UpstreamRepo.git"
+} else {
+    git remote add $UpstreamRemote "https://github.com/$UpstreamRepo.git"
 }
-"@ | Out-File -FilePath ".opencode/plugin/sidebar-stats.ts" -Encoding UTF8
-        
-        git add .opencode/plugin/sidebar-stats.ts
-        git commit -m "feat: preserve sidebar stats during upstream sync"
-        Write-Host "⚠️  Created manual commit for sidebar stats" -ForegroundColor Yellow
-    } else {
-        Write-Host "💡 Run with -Force to attempt manual merge" -ForegroundColor Cyan
-        git checkout $CurrentBranch
-        git branch -D $SyncBranch
+
+git fetch origin $TargetBranch
+git fetch $UpstreamRemote $UpstreamBranch
+git checkout -B $SyncBranch "origin/$TargetBranch"
+
+try {
+    git merge --no-ff --no-edit "$UpstreamRemote/$UpstreamBranch"
+    Write-Host "✅ Merge completed cleanly" -ForegroundColor Green
+} catch {
+    if (-not $Force) {
+        Write-Host "❌ Merge conflicts detected on $SyncBranch. Resolve them manually, then commit the merge." -ForegroundColor Red
         exit 1
     }
+
+    Write-Host "⚠️  Retrying with upstream-preferred conflict resolution" -ForegroundColor Yellow
+    git merge --abort 2>$null
+    git merge --no-ff --no-edit -X theirs "$UpstreamRemote/$UpstreamBranch"
 }
 
-# Build and test
-Write-Host "🏗️  Building..." -ForegroundColor Yellow
-Set-Location packages/opencode
-bun install
-bun run build
-Set-Location ../..
+Write-Host "📌 Sync branch: $SyncBranch" -ForegroundColor Gray
+Write-Host "📍 Base branch: $TargetBranch" -ForegroundColor Gray
 
-Write-Host "✅ Sync completed successfully!" -ForegroundColor Green
-Write-Host "📦 Build successful" -ForegroundColor Green
-Write-Host ""
-Write-Host "To push changes:" -ForegroundColor Cyan
-Write-Host "  git push origin $SyncBranch" -ForegroundColor Gray
-Write-Host "  gh pr create --title 'feat: sync upstream with sidebar stats' --base main" -ForegroundColor Gray
-Write-Host ""
-Write-Host "To switch back:" -ForegroundColor Cyan
-Write-Host "  git checkout $CurrentBranch" -ForegroundColor Gray
+if ($PrintBranch) {
+    Write-Output $SyncBranch
+}
